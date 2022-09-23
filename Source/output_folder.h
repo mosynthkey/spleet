@@ -12,12 +12,13 @@
 
 #include <map>
 #include <string>
+#include <vector>
 #include <JuceHeader.h>
 #include "spleeter/spleeter.h"
 
 class OutputFolder {
 public:
-  OutputFolder(const std::string &path);
+  OutputFolder(const std::string &path, const std::string &fileNamePrefix, int outputSampleRate);
   ~OutputFolder();
 
   /// Flush the remaining data
@@ -27,9 +28,16 @@ public:
   /// input
   void Write(const std::map<std::string, spleeter::Waveform> &data,
              std::error_code &err);
+    
+  // Add for Melissa
+  using MultiChannelFloatAudioBuffer = std::vector<std::vector<float>>;
+  void SetFileNamePrefix(const std::string& fileNamePrefix) { fileNamePrefix_ = fileNamePrefix; }
   
  private:
   std::string path_;
-  std::map<std::string, std::shared_ptr<AudioFormatWriter>> writers_;
+  std::string fileNamePrefix_;
+  int outputSampleRate_;
+  
+  std::map<std::string, MultiChannelFloatAudioBuffer> buffers_;
   std::map<std::string, spleeter::Waveform> previous_write_;
 };

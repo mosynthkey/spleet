@@ -15,85 +15,122 @@
 namespace {
 
 std::string JoinPath(const std::string parent, const std::string &child) {
-  return parent + "/" + child;
+    return parent + "/" + child;
 }
 
 template <typename SignalType>
-void Write(SignalType signal, std::shared_ptr<AudioFormatWriter> writer) {
-  std::vector<float *> array_data;
-  std::vector<std::vector<float>> vec_data;
-  for (auto channel_idx = 0; channel_idx < signal.rows(); channel_idx++) {
-    std::vector<float> channel_data(signal.cols());
-    Eigen::Map<Eigen::VectorXf>(channel_data.data(), signal.cols()) =
-        signal.row(channel_idx);
-    vec_data.emplace_back(std::move(channel_data));
-    array_data.push_back(vec_data[channel_idx].data());
-  }
-  writer->writeFromFloatArrays(array_data.data(), signal.rows(), signal.cols());
+void Write(SignalType signal, OutputFolder::MultiChannelFloatAudioBuffer& buffer) {
+    for (auto channel_idx = 0; channel_idx < signal.rows(); channel_idx++) {
+        std::vector<float> channel_data(signal.cols());
+        Eigen::Map<Eigen::VectorXf>(channel_data.data(), signal.cols()) = signal.row(channel_idx);
+        buffer[channel_idx].insert(buffer[channel_idx].end(), channel_data.begin(), channel_data.end());
+    }
 }
 
 } // namespace
 
-OutputFolder::OutputFolder(const std::string &path) : path_(path) {}
+OutputFolder::OutputFolder(const std::string &path, const std::string &fileNamePrefix, int outputSampleRate) :
+path_(path), fileNamePrefix_(fileNamePrefix), outputSampleRate_(outputSampleRate) {}
 
 OutputFolder::~OutputFolder() { Flush(); }
 
 void OutputFolder::Flush() {
-  // write the remaining data
-  for (auto previous_write : previous_write_) {
-    ::Write(previous_write.second, writers_[previous_write.first]);
-  }
-
-  for (auto writer : writers_) {
-    writer.second->flush();
-  }
+    // write the remaining data
+    for (auto previous_write : previous_write_) {
+        ::Write(previous_write.second, buffers_[previous_write.first]);
+    }
+    
+    // Convert sample rate and write to file
+    for (auto& partNameAndBuffer : buffers_)
+    {
+        auto& part = partNameAndBuffer.first;
+        auto& buffer = partNameAndBuffer.second;
+        
+        const int numChannels = static_cast<int>(buffer.size());
+        if (numChannels < 1 || 2 < numChannels) return; // Do nothing
+        
+        float* floatBuffer[2 /* Stereo */];
+        if (buffers_.size() < 2)
+        {
+            // Mono
+            floatBuffer[0] = floatBuffer[1] = buffer[0].data();
+        }
+        else
+        {
+            // Stereo
+            floatBuffer[0] = buffer[0].data();
+            floatBuffer[1] = buffer[1].data();
+        }
+        
+        AudioBuffer<float> audioBuffer(floatBuffer, numChannels, static_cast<int>(buffer[0].size()));
+        MemoryAudioSource audioSource(audioBuffer, false);
+        DBG("MemoryAudioSource " + String(audioSource.getTotalLength()));
+        ResamplingAudioSource resamplingAudioSource(&audioSource, false, numChannels);
+        //DBG("ResamplingAudioSource " + String(resamplingAudioSource.getTotalLength()));
+        resamplingAudioSource.setResamplingRatio(kProcessSamplingRate / outputSampleRate_);
+        resamplingAudioSource.prepareToPlay(2048, outputSampleRate_);
+        
+        OggVorbisAudioFormat format;
+        
+        File output_file(::JoinPath(path_, fileNamePrefix_ + "_" + part + ".ogg"));
+        // If file already exists, delete it
+        if (output_file.existsAsFile()) output_file.deleteFile();
+        
+        auto writer = format.createWriterFor(new FileOutputStream(output_file), outputSampleRate_, numChannels, 16, StringPairArray(), 0);
+        const int outputSize = buffer[0].size() * outputSampleRate_ / kProcessSamplingRate;
+        writer->writeFromAudioSource(resamplingAudioSource, outputSize);
+        writer->flush();
+    }
 }
 
 void OutputFolder::Write(const std::map<std::string, spleeter::Waveform> &data,
                          std::error_code &err) {
-  for (auto waveform : data) {
-    auto channel_count = waveform.second.rows();
-    auto frame_count = waveform.second.cols();
-
-    // If no writer found, create it
-    if (writers_.find(waveform.first) == std::end(writers_)) {
-      File output_file(::JoinPath(path_, waveform.first + ".wav"));
-      if (output_file.existsAsFile()) { // If file already exists, delete it
-        output_file.deleteFile();
-      }
-      WavAudioFormat format;
+    for (auto waveform : data) {
+        auto channel_count = waveform.second.rows();
+        auto frame_count = waveform.second.cols();
         
-      auto writer = std::shared_ptr<AudioFormatWriter>(format.createWriterFor(new FileOutputStream(output_file), kProcessSamplingRate,
-                                                                                channel_count, 16, StringPairArray(), 0));
+        // If no writer found, create it
+        if (buffers_.find(waveform.first) == std::end(buffers_)) {
+            File output_file(::JoinPath(path_, fileNamePrefix_ + "_" + waveform.first + ".ogg"));
+            if (output_file.existsAsFile()) { // If file already exists, delete it
+                output_file.deleteFile();
+            }
+            /*
+             OggVorbisAudioFormat format;
+             auto writer = std::shared_ptr<AudioFormatWriter>(format.createWriterFor(new FileOutputStream(output_file), kProcessSamplingRate,
+             static_cast<unsigned int>(channel_count), 16, StringPairArray(), 0));
+             */
+            
+            // buffers_[waveform.first] = std::make_unique<AudioBuffer<float>>(channel_count, 0);
+            
+            buffers_[waveform.first].resize(channel_count);
+            previous_write_[waveform.first] = spleeter::Waveform();
+        }
         
-      writers_[waveform.first] = writer;
-      previous_write_[waveform.first] = spleeter::Waveform();
-    }
-
-    // Cross fade the beginning with the kept buffer
-    auto previous_write_frame_count = previous_write_[waveform.first].cols();
-    Eigen::VectorXf fade_in(previous_write_frame_count);
-    Eigen::VectorXf fade_out(previous_write_frame_count);
-    for (auto idx = 0; idx < previous_write_frame_count; idx++) {
-      fade_in(idx) = static_cast<float>(idx) / previous_write_frame_count;
-      fade_out(idx) = 1.0 - fade_in(idx);
-    }
-    for (auto row = 0; row < previous_write_[waveform.first].rows(); row++) {
-      auto data =
-          waveform.second.row(row).segment(0, previous_write_frame_count);
-      auto previous_data = previous_write_[waveform.first].row(row);
-      data.array() = (data.array() * fade_in.transpose().array()) +
-                     (previous_data.array() * fade_out.transpose().array());
-    }
-
-    // Keep the last second
-    auto frame_to_keep =
+        // Cross fade the beginning with the kept buffer
+        auto previous_write_frame_count = previous_write_[waveform.first].cols();
+        Eigen::VectorXf fade_in(previous_write_frame_count);
+        Eigen::VectorXf fade_out(previous_write_frame_count);
+        for (auto idx = 0; idx < previous_write_frame_count; idx++) {
+            fade_in(idx) = static_cast<float>(idx) / previous_write_frame_count;
+            fade_out(idx) = 1.0 - fade_in(idx);
+        }
+        for (auto row = 0; row < previous_write_[waveform.first].rows(); row++) {
+            auto data =
+            waveform.second.row(row).segment(0, previous_write_frame_count);
+            auto previous_data = previous_write_[waveform.first].row(row);
+            data.array() = (data.array() * fade_in.transpose().array()) +
+            (previous_data.array() * fade_out.transpose().array());
+        }
+        
+        // Keep the last second
+        auto frame_to_keep =
         std::min(static_cast<int>(kProcessSamplingRate * kBatchOverlapSeconds),
                  static_cast<int>(waveform.second.cols()));
-    previous_write_[waveform.first] = waveform.second.rightCols(frame_to_keep);
-
-    // Write to disk
-    auto frame_to_write = frame_count - frame_to_keep;
-    ::Write(waveform.second.leftCols(frame_to_write), writers_[waveform.first]);
-  }
+        previous_write_[waveform.first] = waveform.second.rightCols(frame_to_keep);
+        
+        // Write to disk
+        auto frame_to_write = frame_count - frame_to_keep;
+        ::Write(waveform.second.leftCols(frame_to_write), buffers_[waveform.first]);
+    }
 }
