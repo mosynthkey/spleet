@@ -18,7 +18,7 @@
 
 class OutputFolder {
 public:
-  OutputFolder(const std::string &path, const std::string &fileNamePrefix, int outputSampleRate);
+  OutputFolder(const std::string &path, const std::string &fileNamePrefix, int outputSampleRate, int bufferLength);
   ~OutputFolder();
 
   /// Flush the remaining data
@@ -37,6 +37,7 @@ public:
   std::string path_;
   std::string fileNamePrefix_;
   int outputSampleRate_;
+  int bufferLength_;
   
   std::map<std::string, MultiChannelFloatAudioBuffer> buffers_;
   std::map<std::string, spleeter::Waveform> previous_write_;

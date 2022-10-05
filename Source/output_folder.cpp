@@ -29,8 +29,8 @@ void Write(SignalType signal, OutputFolder::MultiChannelFloatAudioBuffer& buffer
 
 } // namespace
 
-OutputFolder::OutputFolder(const std::string &path, const std::string &fileNamePrefix, int outputSampleRate) :
-path_(path), fileNamePrefix_(fileNamePrefix), outputSampleRate_(outputSampleRate) {}
+OutputFolder::OutputFolder(const std::string &path, const std::string &fileNamePrefix, int outputSampleRate, int bufferLength) :
+path_(path), fileNamePrefix_(fileNamePrefix), outputSampleRate_(outputSampleRate), bufferLength_(bufferLength) {}
 
 OutputFolder::~OutputFolder() { Flush(); }
 
@@ -64,9 +64,7 @@ void OutputFolder::Flush() {
         
         AudioBuffer<float> audioBuffer(floatBuffer, numChannels, static_cast<int>(buffer[0].size()));
         MemoryAudioSource audioSource(audioBuffer, false);
-        DBG("MemoryAudioSource " + String(audioSource.getTotalLength()));
         ResamplingAudioSource resamplingAudioSource(&audioSource, false, numChannels);
-        //DBG("ResamplingAudioSource " + String(resamplingAudioSource.getTotalLength()));
         resamplingAudioSource.setResamplingRatio(kProcessSamplingRate / outputSampleRate_);
         resamplingAudioSource.prepareToPlay(2048, outputSampleRate_);
         
@@ -77,8 +75,7 @@ void OutputFolder::Flush() {
         if (output_file.existsAsFile()) output_file.deleteFile();
         
         auto writer = format.createWriterFor(new FileOutputStream(output_file), outputSampleRate_, numChannels, 16, StringPairArray(), 0);
-        const int outputSize = buffer[0].size() * outputSampleRate_ / kProcessSamplingRate;
-        writer->writeFromAudioSource(resamplingAudioSource, outputSize);
+        writer->writeFromAudioSource(resamplingAudioSource, bufferLength_ * 2);
         writer->flush();
     }
 }
@@ -91,18 +88,6 @@ void OutputFolder::Write(const std::map<std::string, spleeter::Waveform> &data,
         
         // If no writer found, create it
         if (buffers_.find(waveform.first) == std::end(buffers_)) {
-            File output_file(::JoinPath(path_, fileNamePrefix_ + "_" + waveform.first + ".ogg"));
-            if (output_file.existsAsFile()) { // If file already exists, delete it
-                output_file.deleteFile();
-            }
-            /*
-             OggVorbisAudioFormat format;
-             auto writer = std::shared_ptr<AudioFormatWriter>(format.createWriterFor(new FileOutputStream(output_file), kProcessSamplingRate,
-             static_cast<unsigned int>(channel_count), 16, StringPairArray(), 0));
-             */
-            
-            // buffers_[waveform.first] = std::make_unique<AudioBuffer<float>>(channel_count, 0);
-            
             buffers_[waveform.first].resize(channel_count);
             previous_write_[waveform.first] = spleeter::Waveform();
         }
